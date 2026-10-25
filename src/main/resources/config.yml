@@ -1,0 +1,197 @@
+# ======================================================================================
+#  ZeinAC - anti-xray + anti-freecam for Zein SMP
+#  Philosophy: collect evidence from server-verifiable facts, separate evidence from
+#  punishment, and never punish for statistics alone.
+# ======================================================================================
+
+general:
+  debug: false
+  # SAFE MODE (recommended for the first 1-2 days): everything is detected, logged and alerted,
+  # but NOTHING is cancelled and no escalation command is run. Set to false to start enforcing.
+  safe-mode: true
+  # 1 = monitor only (record, no staff alerts)
+  # 2 = + staff alerts
+  # 3 = + cancel actions the server can PROVE are invalid (block break/use/place through walls or out of reach)
+  # 4 = + staff-reviewed escalation commands (see "escalation")
+  enforcement-level: 3
+  prefix: "<dark_gray>[<red>ZeinAC<dark_gray>]<reset>"
+
+alerts:
+  # Per player + module + type. Repeats inside this window are counted and appended to the next alert.
+  cooldown-seconds: 30
+  console: true
+  recent-memory: 100                 # alerts kept in RAM for /zeinac alerts recent
+  staff-min-confidence: MEDIUM       # LOW alerts are recorded only; MEDIUM/HIGH are sent to staff
+  # Placeholders: <prefix> <player> <module> <type> <confidence> <score> <world> <x> <y> <z> <detail>
+  format: "<prefix> <white><player> <gray>» <red><module>/<type> <yellow><confidence> <gray>score <white><score> <dark_gray>@ <world> <x> <y> <z><newline><dark_gray>  <detail>"
+
+exemptions:
+  # Players listed here (or with permission zeinac.bypass, or added with /zeinac exempt) are never analysed.
+  usernames: []
+  uuids: []
+
+# ======================================================================================
+#  ANTI-FREECAM : server-authoritative interaction validation
+#  A normal Freecam only moves the CLIENT camera, which the server cannot see. What the server
+#  CAN see is the resulting interaction: breaking, opening or placing against a block that the
+#  player's real (server-side) body could not reach or see. Those are validated here.
+# ======================================================================================
+anti-freecam:
+  enabled: true
+  check-creative: false              # creative players are skipped unless true
+  validate:
+    break: true
+    interact: true                   # right/left click on blocks (chests, doors, buttons ...)
+    place: true
+  reach:
+    survival: 4.5                    # vanilla block interaction range
+    creative: 5.0
+    extra: 1.5                       # vanilla itself tolerates +1.0; +0.5 absorbs latency/rounding.
+                                     # Raise it if another plugin/enchant gives players extra reach.
+  line-of-sight: true                # an outline ray cast from the eye must reach the block (15 sample points)
+  look-check: true                   # the block must be roughly in front of the player
+  look-max-degrees: 60               # max angle between server-known look direction and the block (lenient: flicks/lag)
+  history-ms: 350                    # also accept poses from the last N ms (latency tolerance)
+  history-samples: 6
+  bedrock-prefixes: ["."]            # Geyser/Floodgate names: look-check is skipped (touch aiming differs)
+  weights:                           # violation weight per failed check
+    REACH: 2.0
+    NO_LOS: 1.0
+    LOOK: 1.0
+    MULTI_BREAK: 1.5
+  vl:
+    half-life-seconds: 90            # violation level halves every N seconds
+    record: 1.0                      # VL needed to store an alert in the database
+    alert: 3.0                       # VL needed to alert staff
+    escalate: 10.0                   # VL at which an escalation is proposed (level 4)
+  # Optional module: more than N block breaks in a single tick. Vanilla clients cannot do this,
+  # but plugins like VeinMiner/TreeCapitator fire many break events at once -> off by default.
+  multi-break:
+    enabled: false
+    max-per-tick: 3
+
+# ======================================================================================
+#  ANTI-XRAY : statistical evidence from legitimately mined blocks (never cancels/punishes)
+#  Counts ore VEINS (not drops, so Fortune is irrelevant) and separates
+#    "already visible"  = next to a cave, ravine or tunnel the player did not dig  -> ignored for scoring
+#    "hidden discovery" = revealed only by the player's own digging just now        -> scored
+#  Indicators (two independent families; HIGH confidence needs both):
+#    rate      - hidden discoveries vs. what luck predicts (Poisson), and vs. the player's own history
+#    behaviour - how often a freshly dug branch ended exactly at a valuable hidden ore (binomial)
+# ======================================================================================
+anti-xray:
+  enabled: true
+  ignored-worlds: []
+  window-minutes: 45                 # rolling observation window
+  min-counted-blocks: 250            # no evaluation before this many stone-type blocks were mined in the window
+  min-hidden-discoveries: 3          # ... and this many hidden vein discoveries
+  indicators:
+    rate-min-score: 4.0              # score = -log10(p). 4.0 = "1 in 10,000 by luck". Simulated: honest players trip it in ~0.5% of long sessions (LOW only), 6x-baseline X-ray users in ~80% of 800-block sessions
+    behavior-min-score: 3.0
+  lifetime:                          # compare with the player's OWN past (behaviour change over time)
+    min-blocks: 4000                 # needs this much history before the comparison is used
+    prior-blocks: 3000
+  baseline:
+    prior-weight-blocks: 20000       # how strongly the configured rates below are trusted
+    learn-from-server: true          # slowly adapt expected rates to what your non-suspicious players really find
+  vein:
+    link-distance: 3                 # ore blocks this close to a counted vein belong to the same vein
+    link-seconds: 60
+  reveal-by-own-digging-seconds: 90  # an open neighbour block the player broke within this time does NOT count as "already visible"
+  branch:
+    sample-distance: 3.0             # path is sampled every N blocks of travel
+    turn-cosine: 0.6                 # direction change sharper than this starts a new branch
+    min-length: 6.0                  # a branch counts once it is this long
+    null-hit-probability: 0.08       # chance an ordinary branch ends at a hidden valuable ore. Raise if strip miners get flagged.
+    min-branches: 6
+    min-hits: 3
+  suspicion:
+    record-threshold: 4.0            # accumulated suspicion needed to store an alert
+    alert-threshold: 12.0            # ... to alert staff (also needs staff-min-confidence)
+    half-life-minutes: 240           # suspicion decays, so old luck is forgotten
+
+  # Valuable blocks. expected-per-1000 = expected number of HIDDEN vein discoveries per 1000 mined
+  # stone-type blocks inside [y-min, y-max]. These are conservative priors; run for a few days with
+  # learn-from-server on and check /zeinac inspect on honest players, then adjust.
+  groups:
+    diamond:
+      enabled: true
+      environment: NORMAL
+      materials: [DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE]
+      y-min: -64
+      y-max: 16
+      expected-per-1000: 2.5
+    ancient-debris:
+      enabled: true
+      environment: NETHER
+      materials: [ANCIENT_DEBRIS]
+      y-min: 0
+      y-max: 40
+      expected-per-1000: 1.5
+    gold:                             # example of an extra group, disabled by default
+      enabled: false
+      environment: NORMAL
+      materials: [GOLD_ORE, DEEPSLATE_GOLD_ORE]
+      y-min: -64
+      y-max: 32
+      expected-per-1000: 6.0
+
+  # Blocks whose breaking counts as "mining" (the denominator). Per dimension.
+  counted-blocks:
+    NORMAL: [STONE, DEEPSLATE, TUFF, GRANITE, DIORITE, ANDESITE, CALCITE, DRIPSTONE_BLOCK]
+    NETHER: [NETHERRACK, BLACKSTONE, BASALT, SMOOTH_BASALT]
+
+# ======================================================================================
+#  HIDE MODULE (optional, needs the PacketEvents plugin). Server-side hiding of everything
+#  below hide-below-y:
+#    * players above reveal-below-y receive none of it (kills Freecam/X-ray from the surface)
+#    * players below it receive it only within underground-radius-chunks chunks of themselves
+#      (caps how far underground a Freecam can look)
+#  This does NOT replace Paper's own anti-xray for ores - use both (see docs/PAPER_ANTIXRAY.md).
+# ======================================================================================
+hide:
+  enabled: true
+  task-interval-ticks: 5
+  refresh-radius-chunks: 10          # only chunks this close are re-sent when rules change
+  refresh-chunks-per-tick: 4         # re-send budget; lower = gentler, higher = faster updates
+  worlds:
+    world:
+      hide-below-y: 16
+      reveal-below-y: 34
+      hysteresis: 4                  # must climb this far above reveal-below-y before hiding again
+      underground-radius-chunks: 3   # -1 = no radius limit (only the surface rule)
+    # world_nether:                  # the whole nether is "underground"; only enable if you want a radius cap there
+    #   hide-below-y: 128
+    #   reveal-below-y: 1000
+    #   hysteresis: 0
+    #   underground-radius-chunks: 5
+
+# ======================================================================================
+#  LEVEL 4 ESCALATION (off by default). Statistical X-ray evidence can NEVER trigger this.
+#  It is only proposed for sustained, server-verified freecam violations, and staff must run
+#  /zeinac escalate <player> unless auto-for-verified-freecam is true (ignored in safe mode).
+#  Use temporary punishments (tempban/kick); never a permanent ban from automation.
+# ======================================================================================
+escalation:
+  enabled: false
+  auto-for-verified-freecam: false
+  cooldown-minutes: 10
+  commands:
+    - "kick %player% Unfair client advantage detected (ZeinAC)"
+    # - "tempban %player% 1d Unfair client advantage (ZeinAC, staff reviewed)"
+
+storage:
+  file: "zeinac.db"                  # inside plugins/ZeinAC/
+  retention-days: 30                 # alerts older than this are deleted hourly
+  stats-retention-days: 180          # aggregated per-player mining counters (no coordinates)
+
+performance:
+  # Hard cap on line-of-sight validations per player per second. Above it the check fails OPEN
+  # (the action is allowed), so spamming clicks can never become a CPU problem.
+  max-los-checks-per-second: 40
+
+integrations:
+  discord-webhook:                   # optional, async, rate limited
+    enabled: false
+    url: ""                          # must start with https://
+    min-confidence: MEDIUM
